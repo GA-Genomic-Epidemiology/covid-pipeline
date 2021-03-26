@@ -10,6 +10,7 @@ __email__ = "lavanyarishishwar@gmail.com"
 __status__ = "Development"
 
 import datetime
+import glob
 import logging
 import os.path
 import random
@@ -20,7 +21,7 @@ import subprocess
 import sys
 from argparse import ArgumentParser, HelpFormatter
 
-import pathos.multiprocessing as mp
+# import pathos.multiprocessing as mp
 
 PROGRAM_NAME = "pipeline.py"
 VERSION = __version__
@@ -176,6 +177,7 @@ class Support:
 class Analysis:
     # TODO: package these files
     reference_file = "NC_045512.2.fasta"
+    ftypes = ["*.fastq", "*.fq", "*.fastq.gz", "*.fq.gz"]
 
     def __init__(self, opts):
         # General attributes
@@ -191,7 +193,21 @@ class Analysis:
         self.threads = opts.threads
         self.log_file = opts.log_file
         self.verbosity = opts.verbosity
+
+        # Samples collected
+        self.samples = {}
+        # Any errors we encounter
+        self.errors = []
+        # The actual queue for the analysis
         self.analysis = []
+
+        # Verbosity levels and colors
+        self.error_color = Colors.FAIL
+        self.warning_color = Colors.WARNING
+        self.main_process_color = Colors.OKGREEN
+        self.sub_process_color = Colors.OKBLUE
+
+        # Initialize the logger
         Support.init_logger(log_file=self.log_file, verbosity=self.verbosity)
 
     def __str__(self):
@@ -220,20 +236,55 @@ class Analysis:
         """
         return long_string
 
-    def go(self):
+    def validate_options(self):
+        if self.sub_command == "all":
+            self.validate_all_arguments()
+            self.analysis += ['get_files']
+
+    # TODO: Implement validations for file presence and stuff
+    def validate_all_arguments(self):
         pass
+
+    def summarize_run(self):
+        logging.info(self.main_process_color + str(self) + Colors.ENDC)
+        logging.info(self.main_process_color + f"Analysis to perform: " + ",".join(self.analysis) + Colors.ENDC)
+
+    def go(self):
+        self.summarize_run()
+        while True:
+            step = self.analysis[0]
+            self.analysis = self.analysis[1:]
+            function = getattr(self, step)
+            function()
+            if len(self.analysis) == 0:
+                break
 
     # TODO: Make fasta index
     def preprocess_ref_files(self):
         pass
 
     # TODO: Implement safe file pulls
+    # TODO: Implement lane merging
     def get_files(self):
-        pass
-
-    # TODO: Implement validations for file presence and stuff
-    def validate_files(self):
-        pass
+        files = []
+        for ext in Analysis.ftypes:
+            files = files + glob.glob(os.path.join(self.directory, f"*{ext}"))
+        for file in files:
+            basename = os.path.basename(file)
+            sample_id, snum, lane, readn, suffix = basename.split(".")[0].split("_")
+            if sample_id == "Undetermined":
+                continue
+            sample_id = f"{sample_id}_{snum}"
+            if sample_id not in self.samples:
+                self.samples[sample_id] = {"r1": [], "r2": []}
+            if readn == "R1":
+                self.samples[sample_id]["r1"].append(file)
+            elif readn == "R2":
+                self.samples[sample_id]["r2"].append(file)
+            else:
+                logging.warning(f"Discarding read: {file}")
+        logging.info(f"Read {len(self.samples)} samples.")
+        logging.info(self.samples)
 
 
 if __name__ == '__main__':
@@ -245,7 +296,6 @@ if __name__ == '__main__':
                             ''',
                             formatter_class=lambda prog: HelpFormatter(prog, width=120, max_help_position=120))
 
-    # TODO: Make these options work in way that they can be used after the subcommand
     parser.add_argument('--help', '-h', '--h', action='store_true', default=False)
     parser.add_argument('--version', action='version', version=f"{PROGRAM_NAME} {VERSION}")
 
@@ -261,10 +311,10 @@ if __name__ == '__main__':
     all_input_group = all_parser.add_argument_group('Required Input options')
     all_input_group.add_argument('--directory', '-d', '--d', required=False, default=None, metavar='<DIR>',
                                  help='Directory containing .fastq(.gz) files', dest="directory")
-    all_input_group.add_argument('--metafile', '-m', '--m', required=False, default=None, metavar='<METAFILE>',
+    all_input_group.add_argument('--metafile', '-m', '--m', required=False, default=None, metavar='<FILE>',
                                  help='Metafile containing sample to data mapping', dest="metafile")
-    all_input_group.add_argument('--sequencing-protocol', '-s', '--s', required=False, default="Swift",
-                                 metavar='<SEQ-PROT>', dest="seqprot",
+    all_input_group.add_argument('--seq-prot', '-s', '--s', required=False, default="Swift",
+                                 metavar='<PROT>', dest="seqprot",
                                  help='Which sequencing protocols was used? Options: Swift. (Default: %(default)s)')
 
     # Add all output arguments
@@ -320,3 +370,20 @@ if __name__ == '__main__':
         all_parser.print_help()
         print(Colors.ENDC)
         sys.exit(0)
+
+    # Start the analysis
+    analysis = Analysis(options)
+    analysis.validate_options()
+
+    if len(analysis.errors) > 0:
+        print(Colors.HEADER)
+        if options.sub_command == 'all':
+            all_parser.print_help()
+        print(Colors.ENDC)
+        print(Colors.FAIL + '\n\nErrors:')
+        print("\n".join(analysis.errors))
+        print(Colors.ENDC)
+        sys.exit()
+
+        # If we're still good, start the actual analysis
+    analysis.go()
