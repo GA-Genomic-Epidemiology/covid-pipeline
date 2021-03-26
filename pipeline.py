@@ -97,7 +97,7 @@ class Support:
                 logging.debug(f"Error stream: {stderr}")
             else:
                 logging.info(f"Attempting to run: " + " ".join([str(x) for x in command_list]))
-                proc = subprocess.Popen(shlex.split(command_str), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                proc = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         shell=shell, universal_newlines=True)
                 output, stderr = proc.communicate()
                 logging.debug(f"Error stream: {stderr}")
@@ -243,7 +243,9 @@ class Analysis:
 
     # TODO: Implement validations for file presence and stuff
     def validate_all_arguments(self):
-        pass
+        if self.directory is None:
+            self.errors += [self.sub_command + ' requires --directory']
+            return
 
     def summarize_run(self):
         logging.info(self.main_process_color + str(self) + Colors.ENDC)
@@ -272,19 +274,69 @@ class Analysis:
         for file in files:
             basename = os.path.basename(file)
             sample_id, snum, lane, readn, suffix = basename.split(".")[0].split("_")
+
+            # If sample is undertermined, skip
             if sample_id == "Undetermined":
                 continue
+
+            # Sample id will be sample_id_snum
             sample_id = f"{sample_id}_{snum}"
             if sample_id not in self.samples:
-                self.samples[sample_id] = {"r1": [], "r2": []}
+                self.samples[sample_id] = {"r1": "", "r2": ""}
+
             if readn == "R1":
-                self.samples[sample_id]["r1"].append(file)
+                if self.samples[sample_id]["r1"] != "":
+                    logging.error(f"""Found another R1 for {sample_id}, possibly from a different lane.
+                                    This feature isn't implemented yet.""")
+                else:
+                    self.samples[sample_id]["r1"] = file
             elif readn == "R2":
-                self.samples[sample_id]["r2"].append(file)
+                if self.samples[sample_id]["r2"] != "":
+                    logging.error(f"""Found another R2 for {sample_id}, possibly from a different lane.
+                                    This feature isn't implemented yet.""")
+                else:
+                    self.samples[sample_id]["r2"] = file
             else:
                 logging.warning(f"Discarding read: {file}")
+
+        for sample_id in self.samples:
+            if self.samples[sample_id]["r1"] == "" or self.samples[sample_id]["r2"] == "":
+                logging.error(f"{sample_id} only has one file from the pair")
+                self.errors.append(f"{sample_id} only has one file from the pair")
+
         logging.info(f"Read {len(self.samples)} samples.")
         logging.info(self.samples)
+
+    # TODO: polish code
+    def perform_qa(self):
+        # for sample in self.samples:
+        #     Support.run_command(f"fastqc {} {}")
+        pass
+
+    # TODO: polish code
+    def perform_qc(self):
+        pass
+
+    # TODO: polish code
+    def call_variants(self):
+        pass
+
+    # TODO: polish code
+    # TODO: Implement push to a big database
+    def filter_variants(self):
+        pass
+
+    # TODO: polish code
+    def call_consensus(self):
+        pass
+
+    # TODO: polish code
+    def run_pangolin(self):
+        pass
+
+    # TODO: polish code
+    def run_nextclade(self):
+        pass
 
 
 if __name__ == '__main__':
