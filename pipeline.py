@@ -94,13 +94,13 @@ class Support:
             raise ValueError("Support.run_command() was called without any command to execute.")
         try:
             if command_str is not None:
-                logging.info(f"Attempting to run: {command_str}")
+                logging.debug(f"Attempting to run: {command_str}")
                 proc = subprocess.Popen(shlex.split(command_str), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         shell=shell, universal_newlines=True)
                 output, stderr = proc.communicate()
                 logging.debug(f"Error stream: {stderr}")
             else:
-                logging.info(f"Attempting to run: " + " ".join([str(x) for x in command_list]))
+                logging.debug(f"Attempting to run: " + " ".join([str(x) for x in command_list]))
                 proc = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         shell=shell, universal_newlines=True)
                 output, stderr = proc.communicate()
@@ -115,7 +115,7 @@ class Support:
             logging.error(f"Exit code={e.returncode}")
             logging.error(f"Error message={e.output}")
             sys.exit(1)
-        logging.info("Command executed without raising any exceptions")
+        logging.debug("Command executed without raising any exceptions")
         return output
 
     @staticmethod
@@ -247,7 +247,7 @@ class Analysis:
     def validate_options(self):
         if self.sub_command == "all":
             self.validate_all_arguments()
-            self.analysis += ['get_files', 'perform_qa']
+            self.analysis += ['get_files', 'perform_qa', 'perform_qc']
 
     # TODO: Implement validations for file presence and stuff
     def validate_all_arguments(self):
@@ -323,20 +323,41 @@ class Analysis:
             Support.error_out(messages=self.errors)
 
         logging.info(f"Read {len(self.samples)} samples.")
-        logging.info(self.samples)
+        logging.info("Samples found: " + ", ".join(list(self.samples.keys())))
 
     # TODO: polish code
     def perform_qa(self):
-        outdir = os.path.join(self.out_prefix, "qa")
+        outdir = os.path.join(self.out_prefix, "1-QA")
         logging.info(f"Starting quality assessment (fastqc), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
-            Support.run_command(f"fastqc -o {outdir} " + self.samples[sample_id]["r1"] + " " +
-                                self.samples[sample_id]["r2"])
+            logging.info(f"Assessing {sample_id}")
+            r1 = self.samples[sample_id]["r1"]
+            r2 = self.samples[sample_id]["r2"]
+            Support.run_command(f"fastqc -o {outdir} {r1} {r2}")
+
+        # TODO: Implement multiqc
+        # multiqc {outdir}
 
     # TODO: polish code
     def perform_qc(self):
-        pass
+        outdir = os.path.join(self.out_prefix, "2-QC")
+        logging.info(f"Starting quality assessment (trimmomatic), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            logging.info(f"Trimming {sample_id}")
+            self.samples[sample_id]["qc_r1"] = f"{outdir}/{sample_id}_R1.trimmed.fastq.gz"
+            self.samples[sample_id]["qc_r2"] = f"{outdir}/{sample_id}_R2.trimmed.fastq.gz"
+            r1 = self.samples[sample_id]["r1"]
+            r2 = self.samples[sample_id]["r2"]
+            trim_r1 = self.samples[sample_id]["qc_r1"]
+            trim_r2 = self.samples[sample_id]["qc_r2"]
+
+            Support.run_command(f"""trimmomatic PE -threads {self.threads} -trimlog {outdir}/{sample_id}.trimlog  
+                                {r1} {r2} {trim_r1} /dev/null {trim_r2} /dev/null
+                                ILLUMINACLIP:TruSeq3-PE-JI.fa:2:30:10:1:true
+                                ILLUMINACLIP:TruSeq3-PE-JI2.fa:2:30:10
+                                SLIDINGWINDOW:10:28 MINLEN:101""")
 
     # TODO: polish code
     def call_variants(self):
