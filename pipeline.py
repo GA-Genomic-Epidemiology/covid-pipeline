@@ -85,26 +85,28 @@ class Support:
 
     # TODO: Implement checks for dependency progams
     @staticmethod
-    def check_dependencies():
+    def check_dependencies(program_list: list = None):
         pass
 
     @staticmethod
-    def run_command(command_str: str = None, command_list: list = None, shell=False):
+    def run_command(command_str: str = None, command_list: list = None, shell=False, split=True):
         if command_str is None and command_list is None:
             raise ValueError("Support.run_command() was called without any command to execute.")
         try:
             if command_str is not None:
                 logging.debug(f"Attempting to run: {command_str}")
-                proc = subprocess.Popen(shlex.split(command_str), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                if split:
+                    command_str = shlex.split(command_str)
+                proc = subprocess.Popen(command_str, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         shell=shell, universal_newlines=True)
                 output, stderr = proc.communicate()
-                logging.debug(f"Error stream: {stderr}")
+                logging.debug(f"Standard Error stream:\n{stderr}")
             else:
                 logging.debug(f"Attempting to run: " + " ".join([str(x) for x in command_list]))
                 proc = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         shell=shell, universal_newlines=True)
                 output, stderr = proc.communicate()
-                logging.debug(f"Error stream: {stderr}")
+                logging.debug(f"Standard Error stream:\n{stderr}")
         except subprocess.CalledProcessError as e:
             logging.error(f"Encountered an error executing the command: ")
             if command_str is not None:
@@ -185,7 +187,13 @@ class Support:
 class Analysis:
     # TODO: package these files
     reference_file = "NC_045512.2.fasta"
+    reference_seqid = "NC_045512.2"
+    swift_regions = "25-29852"
     ftypes = ["*.fastq", "*.fq", "*.fastq.gz", "*.fq.gz"]
+    program_list = ["fastqc", "trimmomatic", "bwa", "sambamba", "bcftools", "tabix"]
+    out_subdir = {'qa': '1-QualityAssessment', 'qc': '2-QualityControl', 'varcall': '3-VariantCalling',
+                  'varfilt': '4-VariantFiltering', 'consensus': '5-ConsensusCalling',
+                  'pangolin': '6-Pangolin'}
 
     def __init__(self, opts):
         # General attributes
@@ -247,7 +255,7 @@ class Analysis:
     def validate_options(self):
         if self.sub_command == "all":
             self.validate_all_arguments()
-            self.analysis += ['get_files', 'perform_qa', 'perform_qc']
+            self.analysis += ['get_files', 'perform_qa', 'perform_qc', 'call_variants']
 
     # TODO: Implement validations for file presence and stuff
     def validate_all_arguments(self):
@@ -264,7 +272,7 @@ class Analysis:
 
     def summarize_run(self):
         logging.info(self.main_process_color + str(self) + Colors.ENDC)
-        logging.info(self.main_process_color + f"Analysis to perform: " + ",".join(self.analysis) + Colors.ENDC)
+        logging.info(self.main_process_color + f"Analysis to perform: " + ", ".join(self.analysis) + Colors.ENDC)
 
     def go(self):
         self.summarize_run()
@@ -327,21 +335,21 @@ class Analysis:
 
     # TODO: polish code
     def perform_qa(self):
-        outdir = os.path.join(self.out_prefix, "1-QA")
-        logging.info(f"Starting quality assessment (fastqc), results will be stored here: {outdir}")
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['qa'])
+        logging.info(f"Starting quality assessment (FastQC), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
             logging.info(f"Assessing {sample_id}")
             r1 = self.samples[sample_id]["r1"]
             r2 = self.samples[sample_id]["r2"]
-            Support.run_command(f"fastqc -o {outdir} {r1} {r2}")
+            Support.run_command(command_str=f"fastqc -o {outdir} -t {self.threads} {r1} {r2}")
 
         # TODO: Implement multiqc
         # multiqc {outdir}
 
     # TODO: polish code
     def perform_qc(self):
-        outdir = os.path.join(self.out_prefix, "2-QC")
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['qc'])
         logging.info(f"Starting quality assessment (trimmomatic), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
@@ -353,15 +361,47 @@ class Analysis:
             trim_r1 = self.samples[sample_id]["qc_r1"]
             trim_r2 = self.samples[sample_id]["qc_r2"]
 
-            Support.run_command(f"""trimmomatic PE -threads {self.threads} -trimlog {outdir}/{sample_id}.trimlog  
-                                {r1} {r2} {trim_r1} /dev/null {trim_r2} /dev/null
-                                ILLUMINACLIP:TruSeq3-PE-JI.fa:2:30:10:1:true
-                                ILLUMINACLIP:TruSeq3-PE-JI2.fa:2:30:10
-                                SLIDINGWINDOW:10:28 MINLEN:101""")
+            cmd = f"trimmomatic PE -threads {self.threads} -trimlog {outdir}/{sample_id}.trimlog "
+            cmd += f"{r1} {r2} {trim_r1} /dev/null {trim_r2} /dev/null "
+            cmd += f"ILLUMINACLIP:TruSeq3-PE-JI.fa:2:30:10:1:true ILLUMINACLIP:TruSeq3-PE-JI2.fa:2:30:10 "
+            cmd += f"SLIDINGWINDOW:10:{self.min_base_qual} MINLEN:{self.min_read_len} AVGQUAL:{self.min_read_qual}"
+            Support.run_command(command_str=cmd)
 
     # TODO: polish code
     def call_variants(self):
-        pass
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['varcall'])
+        logging.info(f"Starting variant calling (BWA/HTSlib), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            logging.info(f"Mapping {sample_id}")
+            self.samples[sample_id]["bam"] = f"{outdir}/{sample_id}.bam"
+            self.samples[sample_id]["vcf"] = f"{outdir}/{sample_id}.vcf.gz"
+            r1 = self.samples[sample_id]["qc_r1"]
+            r2 = self.samples[sample_id]["qc_r2"]
+            sam = f"{outdir}/{sample_id}.sam"
+            ubam = f"{outdir}/{sample_id}.unsorted.bam"
+            bam = self.samples[sample_id]["bam"]
+            vcf = self.samples[sample_id]["vcf"]
+
+            Support.run_command(
+                command_str=f"bwa mem {Analysis.reference_file} {r1} {r2} -M -t {self.threads} -o {sam}")
+
+            logging.info(f"Converting {sample_id} SAM to BAM")
+            Support.run_command(command_str=f"""sambamba view -F 'not (unmapped or mate_is_unmapped)'
+             -f bam -S {sam} -o {ubam} -t {self.threads}""")
+            os.remove(sam)
+
+            logging.info(f"Sorting {sample_id} BAM")
+            Support.run_command(command_str=f"sambamba sort -o {bam} -t {self.threads} {ubam}")
+            os.remove(ubam)
+
+            logging.info(f"Calling variants {sample_id}")
+            mpileup_cmd = f"bcftools mpileup -Ou -Q 0 -B -a FORMAT/AD,FORMAT/DP -L 10000 -f {Analysis.reference_file} {bam}"
+            call_cmd = f"bcftools call -mv -Oz -o {vcf} --ploidy 1"
+            Support.run_command(command_str=f"{mpileup_cmd} | {call_cmd}", shell=True, split=False)
+
+            logging.info(f"Indexing {sample_id}")
+            Support.run_command(command_str=f"tabix -p vcf {vcf}")
 
     # TODO: polish code
     # TODO: Implement push to a big database
@@ -423,7 +463,7 @@ if __name__ == '__main__':
     all_filter_group.add_argument('--depth-filter', required=False, default=30, metavar='<DP>', type=int,
                                   help='Minimum read depth for variants (Default: %(default)s)',
                                   dest="depth_filter")
-    all_filter_group.add_argument('--min-read-len', required=False, default=120, metavar='<READLEN>', type=int,
+    all_filter_group.add_argument('--min-read-len', required=False, default=101, metavar='<READLEN>', type=int,
                                   help='Minimum sequencing read length (Default: %(default)s)',
                                   dest="min_read_len")
     all_filter_group.add_argument('--min-read-quality', required=False, default=18, metavar='<READQUAL>', type=int,
