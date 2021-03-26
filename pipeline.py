@@ -192,7 +192,7 @@ class Analysis:
     ftypes = ["*.fastq", "*.fq", "*.fastq.gz", "*.fq.gz"]
     program_list = ["fastqc", "trimmomatic", "bwa", "sambamba", "bcftools", "tabix"]
     out_subdir = {'qa': '1-QualityAssessment', 'qc': '2-QualityControl', 'varcall': '3-VariantCalling',
-                  'varfilt': '4-VariantFiltering', 'consensus': '5-ConsensusCalling',
+                  'varfilt': '4-VariantFiltering', 'cons': '5-ConsensusCalling',
                   'pangolin': '6-Pangolin'}
 
     def __init__(self, opts):
@@ -255,7 +255,8 @@ class Analysis:
     def validate_options(self):
         if self.sub_command == "all":
             self.validate_all_arguments()
-            self.analysis += ['get_files', 'perform_qa', 'perform_qc', 'call_variants']
+            self.analysis += ['get_files', 'perform_qa', 'perform_qc', 'call_variants',
+                              'filter_variants', 'call_consensus']
 
     # TODO: Implement validations for file presence and stuff
     def validate_all_arguments(self):
@@ -272,7 +273,7 @@ class Analysis:
 
     def summarize_run(self):
         logging.info(self.main_process_color + str(self) + Colors.ENDC)
-        logging.info(self.main_process_color + f"Analysis to perform: " + ", ".join(self.analysis) + Colors.ENDC)
+        logging.info(self.main_process_color + f"Analysis to perform: " + " -> ".join(self.analysis) + Colors.ENDC)
 
     def go(self):
         self.summarize_run()
@@ -406,11 +407,39 @@ class Analysis:
     # TODO: polish code
     # TODO: Implement push to a big database
     def filter_variants(self):
-        pass
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['varfilt'])
+        logging.info(f"Filtering variants (HTSlib), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            logging.info(f"Filtering variants for {sample_id}")
+            self.samples[sample_id]["filtvcf"] = f"{outdir}/filt.{sample_id}.vcf.gz"
+
+            in_vcf = self.samples[sample_id]["vcf"]
+            out_vcf = self.samples[sample_id]["filtvcf"]
+
+            cmd = f"bcftools filter -i'FORMAT/DP>{self.depth_filter} && QUAL>30' "
+            cmd += f"-r'{Analysis.reference_seqid}:{Analysis.swift_regions}' {in_vcf} -o {out_vcf}"
+            Support.run_command(command_str=cmd)
+
+            cmd = f"bcftools index {out_vcf}"
+            Support.run_command(command_str=cmd)
 
     # TODO: polish code
     def call_consensus(self):
-        pass
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['cons'])
+        logging.info(f"Consensus calling (HTSlib), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            logging.info(f"Calling consensus sequence for {sample_id}")
+            self.samples[sample_id]["cons"] = f"{outdir}/{sample_id}.fasta"
+
+            if "filtvcf" in self.samples[sample_id]:
+                in_vcf = self.samples[sample_id]["filtvcf"]
+            else:
+                in_vcf = self.samples[sample_id]["vcf"]
+            out_fa = self.samples[sample_id]["cons"]
+            cmd = f"bcftools consensus -f {Analysis.reference_file} -o {out_fa} {in_vcf}"
+            Support.run_command(command_str=cmd)
 
     # TODO: polish code
     def run_pangolin(self):
