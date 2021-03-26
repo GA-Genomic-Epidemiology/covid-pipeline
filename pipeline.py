@@ -192,9 +192,9 @@ class Analysis:
     swift_regions = "25-29852"
     ftypes = ["*.fastq", "*.fq", "*.fastq.gz", "*.fq.gz"]
     program_list = ["fastqc", "trimmomatic", "bwa", "sambamba", "bcftools", "tabix"]
-    out_subdir = {'qa': '1-QualityAssessment', 'qc': '2-QualityControl', 'varcall': '3-VariantCalling',
-                  'varfilt': '4-VariantFiltering', 'cons': '5-ConsensusCalling',
-                  'pangolin': '6-Pangolin', 'nextclade': '7-NextClade'}
+    out_subdir = {'qa': '1-QualityAssessment', 'qc': '2-QualityControl', 'map': '3-Mapping',
+                  'cov': '4-CoverageCalculation', 'varcall': '4-VariantCalling', 'varfilt': '5-VariantFiltering',
+                  'cons': '6-ConsensusCalling', 'pangolin': '7-Pangolin', 'nextclade': '8-NextClade'}
 
     def __init__(self, opts):
         # General attributes
@@ -207,6 +207,7 @@ class Analysis:
         self.min_read_len = opts.min_read_len
         self.min_read_qual = opts.min_read_qual
         self.min_base_qual = opts.min_base_qual
+        self.min_genome_cov = opts.min_genome_cov
         self.threads = opts.threads
         self.log_file = opts.log_file
         self.verbosity = opts.verbosity
@@ -259,9 +260,9 @@ class Analysis:
     def validate_options(self):
         if self.sub_command == "all":
             self.validate_all_arguments()
-            self.analysis += ['get_files', 'perform_qa', 'perform_qc', 'call_variants',
-                              'filter_variants', 'call_consensus', 'run_pangolin', 'run_nextclade',
-                              'print_report']
+            self.analysis += ['get_files', 'perform_qa', 'perform_qc', 'map_reads',
+                              'calculate_coverage_metrics', 'call_variants', 'filter_variants', 'call_consensus',
+                              'run_pangolin', 'run_nextclade', 'print_report']
 
     # TODO: Implement validations for file presence and stuff
     def validate_all_arguments(self):
@@ -278,7 +279,8 @@ class Analysis:
 
     def summarize_run(self):
         logging.info(self.main_process_color + str(self) + Colors.ENDC)
-        logging.info(self.main_process_color + f"Analysis to perform: " + " -> ".join(self.analysis) + Colors.ENDC)
+        logging.info(self.main_process_color + f"Analysis to perform: " + " -> ".join(
+            [x.replace("_", " ") for x in self.analysis]) + Colors.ENDC)
 
     def go(self):
         self.summarize_run()
@@ -288,7 +290,7 @@ class Analysis:
             function = getattr(self, step)
             function()
             if len(self.analysis) == 0:
-                logging.info(f"Full process took {round(time.time()-self.time, 2)} seconds")
+                logging.info(f"Full process took {round(time.time() - self.time, 2)} seconds")
                 break
 
     # TODO: Make fasta index
@@ -377,23 +379,23 @@ class Analysis:
             Support.run_command(command_str=cmd)
 
     # TODO: polish code
-    def call_variants(self):
+    def map_reads(self):
         outdir = os.path.join(self.out_prefix, Analysis.out_subdir['varcall'])
         logging.info(f"Starting variant calling (BWA/HTSlib), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
             logging.info(f"Mapping {sample_id}")
             self.samples[sample_id]["bam"] = f"{outdir}/{sample_id}.bam"
-            self.samples[sample_id]["vcf"] = f"{outdir}/{sample_id}.vcf.gz"
             r1 = self.samples[sample_id]["qc_r1"]
             r2 = self.samples[sample_id]["qc_r2"]
             sam = f"{outdir}/{sample_id}.sam"
             ubam = f"{outdir}/{sample_id}.unsorted.bam"
             bam = self.samples[sample_id]["bam"]
-            vcf = self.samples[sample_id]["vcf"]
 
             Support.run_command(
                 command_str=f"bwa mem {Analysis.reference_file} {r1} {r2} -M -t {self.threads} -o {sam}")
+
+            # TODO: Calculate mapped reads %
 
             logging.info(f"Converting {sample_id} SAM to BAM")
             Support.run_command(command_str=f"""sambamba view -F 'not (unmapped or mate_is_unmapped)'
@@ -403,6 +405,54 @@ class Analysis:
             logging.info(f"Sorting {sample_id} BAM")
             Support.run_command(command_str=f"sambamba sort -o {bam} -t {self.threads} {ubam}")
             os.remove(ubam)
+
+    # TODO: polish code
+    def calculate_coverage_metrics(self):
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['cov'])
+        logging.info(f"Starting coverage calculation (HTSlib), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            logging.info(f"Calculating depth for {sample_id}")
+            bam = self.samples[sample_id]["bam"]
+            depth_file = os.path.join(outdir, f"{sample_id}.depth")
+
+            cmd = f"samtools depth -d 0 -a -r '{Analysis.reference_seqid}:{Analysis.swift_regions}' {bam} > {depth_file}"
+
+            Support.run_command(command_str=cmd, shell=True, split=False)
+
+            total_bases = 0
+            depth_coverage = 0
+            genome_coverage = 0
+
+            with open(depth_file, "r") as f:
+                for line in f:
+                    depth = int(line.rstrip().split("\t")[2])
+                    if depth >= self.depth_filter:
+                        genome_coverage += 1
+
+                    depth_coverage += depth
+                    total_bases += 1
+
+            self.report[sample_id]["Depth Coverage"] = round(depth_coverage / total_bases, 2)
+            self.report[sample_id]["Genome Coverage"] = round(genome_coverage * 100 / total_bases, 2)
+
+            if self.report[sample_id]["Depth Coverage"] < self.depth_filter or \
+                    self.report[sample_id]["Depth Coverage"] < self.min_genome_cov:
+                self.report[sample_id]["Coverage Pass"] = "Fail"
+            else:
+                self.report[sample_id]["Coverage Pass"] = "Pass"
+
+    # TODO: polish code
+    def call_variants(self):
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['varcall'])
+        logging.info(f"Starting variant calling (BWA/HTSlib), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            if self.report[sample_id]["Coverage Pass"] == "Fail":
+                continue
+            self.samples[sample_id]["vcf"] = f"{outdir}/{sample_id}.vcf.gz"
+            bam = self.samples[sample_id]["bam"]
+            vcf = self.samples[sample_id]["vcf"]
 
             logging.info(f"Calling variants {sample_id}")
             mpileup_cmd = f"bcftools mpileup -Ou -Q 0 -B -a FORMAT/AD,FORMAT/DP -L 10000 -f {Analysis.reference_file} {bam}"
@@ -419,6 +469,8 @@ class Analysis:
         logging.info(f"Filtering variants (HTSlib), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
+            if self.report[sample_id]["Coverage Pass"] == "Fail":
+                continue
             logging.info(f"Filtering variants for {sample_id}")
             self.samples[sample_id]["filtvcf"] = f"{outdir}/filt.{sample_id}.vcf.gz"
 
@@ -438,6 +490,8 @@ class Analysis:
         logging.info(f"Consensus calling (HTSlib), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
+            if self.report[sample_id]["Coverage Pass"] == "Fail":
+                continue
             logging.info(f"Calling consensus sequence for {sample_id}")
             self.samples[sample_id]["cons"] = f"{outdir}/{sample_id}.fasta"
 
@@ -456,6 +510,13 @@ class Analysis:
         logging.info(f"Identifying lineages (Pangolin), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
+            if self.report[sample_id]["Coverage Pass"] == "Fail":
+                self.report[sample_id]["Lineage"] = "."
+                self.report[sample_id]["Lineage_Probability"] = "."
+                self.report[sample_id]["Pangolin_QC"] = "."
+                self.report[sample_id]["Pangolin_Version"] = "."
+                continue
+
             logging.info(f"Identifying lineage for {sample_id}")
             self.samples[sample_id]["pangolin-dir"] = f"{outdir}/pangolin-{sample_id}"
 
@@ -479,6 +540,10 @@ class Analysis:
         logging.info(f"Identifying clades (Nextclade), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
+            if self.report[sample_id]["Coverage Pass"] == "Fail":
+                self.report[sample_id]["Clade"] = "."
+                continue
+
             logging.info(f"Identifying clade for {sample_id}")
             self.samples[sample_id]["nextclade"] = f"{outdir}/nextclade-{sample_id}.tsv"
 
@@ -501,7 +566,8 @@ class Analysis:
         with open(outfile, "w") as f:
             f.write("Sample," + ",".join(headers) + "\n")
             for sample_id in samples:
-                f.write(f"{sample_id}," + ",".join([self.report[sample_id][x] for x in headers]) + "\n")
+                f.write(f"{sample_id}," + ",".join([str(self.report[sample_id][x]) for x in headers]) + "\n")
+
         logging.info(f"Final report file available at: {outfile}")
 
 
@@ -556,6 +622,9 @@ if __name__ == '__main__':
     all_filter_group.add_argument('--min-base-quality', required=False, default=18, metavar='<BASEQUAL>', type=int,
                                   help='Minimum sequencing base quality for read trimming (Default: %(default)s)',
                                   dest="min_base_qual")
+    all_filter_group.add_argument('--min-genome-cov', required=False, default=90, metavar='<GENCOV>', type=int,
+                                  help='Minimum % of genome covered (Default: %(default)s)',
+                                  dest="min_genome_cov")
 
     # Add all performance arguments
     all_runtime_group = all_parser.add_argument_group('Runtime options')
