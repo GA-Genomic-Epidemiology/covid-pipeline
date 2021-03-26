@@ -20,6 +20,7 @@ import string
 import shutil
 import subprocess
 import sys
+import time
 from argparse import ArgumentParser, HelpFormatter
 
 # import pathos.multiprocessing as mp
@@ -193,7 +194,7 @@ class Analysis:
     program_list = ["fastqc", "trimmomatic", "bwa", "sambamba", "bcftools", "tabix"]
     out_subdir = {'qa': '1-QualityAssessment', 'qc': '2-QualityControl', 'varcall': '3-VariantCalling',
                   'varfilt': '4-VariantFiltering', 'cons': '5-ConsensusCalling',
-                  'pangolin': '6-Pangolin'}
+                  'pangolin': '6-Pangolin', 'nextclade': '7-NextClade'}
 
     def __init__(self, opts):
         # General attributes
@@ -210,12 +211,14 @@ class Analysis:
         self.log_file = opts.log_file
         self.verbosity = opts.verbosity
 
-        # Samples collected
-        self.samples = {}
         # Any errors we encounter
         self.errors = []
         # The actual queue for the analysis
         self.analysis = []
+        # Samples collected
+        self.samples = {}
+        # Output report
+        self.report = {}
 
         # Verbosity levels and colors
         self.error_color = Colors.FAIL
@@ -223,6 +226,7 @@ class Analysis:
         self.main_process_color = Colors.OKGREEN
         self.sub_process_color = Colors.OKBLUE
 
+        self.time = time.time()
         # Initialize the logger
         Support.init_logger(log_file=self.log_file, verbosity=self.verbosity)
 
@@ -256,7 +260,8 @@ class Analysis:
         if self.sub_command == "all":
             self.validate_all_arguments()
             self.analysis += ['get_files', 'perform_qa', 'perform_qc', 'call_variants',
-                              'filter_variants', 'call_consensus']
+                              'filter_variants', 'call_consensus', 'run_pangolin', 'run_nextclade',
+                              'print_report']
 
     # TODO: Implement validations for file presence and stuff
     def validate_all_arguments(self):
@@ -283,6 +288,7 @@ class Analysis:
             function = getattr(self, step)
             function()
             if len(self.analysis) == 0:
+                logging.info(f"Full process took {round(time.time()-self.time, 2)} seconds")
                 break
 
     # TODO: Make fasta index
@@ -327,6 +333,8 @@ class Analysis:
             if self.samples[sample_id]["r1"] == "" or self.samples[sample_id]["r2"] == "":
                 logging.debug(f"{sample_id} only has one file from the pair")
                 self.errors.append(f"{sample_id} only has one file from the pair")
+            else:
+                self.report[sample_id] = {}
 
         if len(self.errors) > 0:
             Support.error_out(messages=self.errors)
@@ -351,7 +359,7 @@ class Analysis:
     # TODO: polish code
     def perform_qc(self):
         outdir = os.path.join(self.out_prefix, Analysis.out_subdir['qc'])
-        logging.info(f"Starting quality assessment (trimmomatic), results will be stored here: {outdir}")
+        logging.info(f"Starting quality control (trimmomatic), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
             logging.info(f"Trimming {sample_id}")
@@ -443,11 +451,58 @@ class Analysis:
 
     # TODO: polish code
     def run_pangolin(self):
-        pass
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['pangolin'])
+        outfile = "pangolin_consensus.csv"
+        logging.info(f"Identifying lineages (Pangolin), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            logging.info(f"Identifying lineage for {sample_id}")
+            self.samples[sample_id]["pangolin-dir"] = f"{outdir}/pangolin-{sample_id}"
+
+            in_fa = self.samples[sample_id]["cons"]
+            save_dir = self.samples[sample_id]["pangolin-dir"]
+
+            cmd = f"pangolin {in_fa} -o {save_dir} --outfile {outfile}"
+            Support.run_command(command_str=cmd)
+
+            with open(f"{save_dir}/{outfile}", "r") as f:
+                info = f.readlines()[1].split(",")
+                self.report[sample_id]["Lineage"] = info[1]
+                self.report[sample_id]["Lineage_Probability"] = info[2]
+                self.report[sample_id]["Pangolin_QC"] = info[4]
+                self.report[sample_id]["Pangolin_Version"] = info[3]
+                logging.info(f"{sample_id} has lineage " + self.report[sample_id]["Lineage"])
 
     # TODO: polish code
     def run_nextclade(self):
-        pass
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['nextclade'])
+        logging.info(f"Identifying clades (Nextclade), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            logging.info(f"Identifying clade for {sample_id}")
+            self.samples[sample_id]["nextclade"] = f"{outdir}/nextclade-{sample_id}.tsv"
+
+            in_fa = self.samples[sample_id]["cons"]
+            out_tsv = self.samples[sample_id]["nextclade"]
+
+            cmd = f"nextclade --input-fasta {in_fa} --output-tsv {out_tsv}"
+            Support.run_command(command_str=cmd)
+
+            with open(out_tsv, "r") as f:
+                clade = f.readlines()[1].split("\t")[1]
+                self.report[sample_id]["Clade"] = clade
+                logging.info(f"{sample_id} has clade {clade}")
+
+    # TODO: Pretty print
+    def print_report(self):
+        outfile = os.path.join(self.out_prefix, "report.csv")
+        samples = list(self.samples.keys())
+        headers = list(self.report[samples[0]].keys())
+        with open(outfile, "w") as f:
+            f.write("Sample," + ",".join(headers) + "\n")
+            for sample_id in samples:
+                f.write(f"{sample_id}," + ",".join([self.report[sample_id][x] for x in headers]) + "\n")
+        logging.info(f"Final report file available at: {outfile}")
 
 
 if __name__ == '__main__':
