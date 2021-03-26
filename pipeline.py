@@ -42,9 +42,12 @@ class Colors:
 
 class Support:
     @staticmethod
-    def error_out(message: str = None):
+    def error_out(message: str = None, messages: list = None):
         if message is not None:
-            sys.exit(f"Error: {message}")
+            sys.exit(Colors.FAIL + f"Error: {message}" + Colors.ENDC)
+        elif messages is not None:
+            sys.exit(Colors.FAIL + f"Encountered the following errors, can not continue:\n" + "\n".join(
+                messages) + Colors.ENDC)
         else:
             sys.exit("The program encountered an error and has to exit.")
 
@@ -301,8 +304,11 @@ class Analysis:
 
         for sample_id in self.samples:
             if self.samples[sample_id]["r1"] == "" or self.samples[sample_id]["r2"] == "":
-                logging.error(f"{sample_id} only has one file from the pair")
+                logging.debug(f"{sample_id} only has one file from the pair")
                 self.errors.append(f"{sample_id} only has one file from the pair")
+
+        if len(self.errors) > 0:
+            Support.error_out(messages=self.errors)
 
         logging.info(f"Read {len(self.samples)} samples.")
         logging.info(self.samples)
