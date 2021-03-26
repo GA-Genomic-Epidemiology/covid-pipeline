@@ -17,6 +17,7 @@ import random
 import re
 import shlex
 import string
+import shutil
 import subprocess
 import sys
 from argparse import ArgumentParser, HelpFormatter
@@ -135,17 +136,21 @@ class Support:
     @staticmethod
     def safe_dir_create(this_dir: str):
         try:
-            os.makedirs(this_dir)
+            # TODO: Migrate to newer Pathlib based dir creation
+            os.makedirs(this_dir, exist_ok=True)
         except IOError:
-            print(f"I don't seem to have access to output prefix directory. Are the permissions correct?")
+            print(f"I don't seem to have access to create directory '{this_dir}'. Are the permissions correct?")
             sys.exit(1)
 
     @staticmethod
     def safe_dir_rm(this_dir: str):
+        if not os.path.isdir(this_dir):
+            logging.debug(f"{this_dir} doesn't exist")
+            return
         try:
-            os.rmdir(this_dir)
+            shutil.rmtree(this_dir, ignore_errors=True)
         except IOError:
-            print(f"I don't seem to have access to output prefix directory. Are the permissions correct?")
+            print(f"I don't seem to have access to remove the directory '{this_dir}'. Are the permissions correct?")
             sys.exit(1)
 
     @staticmethod
@@ -242,13 +247,20 @@ class Analysis:
     def validate_options(self):
         if self.sub_command == "all":
             self.validate_all_arguments()
-            self.analysis += ['get_files']
+            self.analysis += ['get_files', 'perform_qa']
 
     # TODO: Implement validations for file presence and stuff
     def validate_all_arguments(self):
         if self.directory is None:
             self.errors += [self.sub_command + ' requires --directory']
             return
+
+        if os.path.isdir(self.out_prefix):
+            logging.warning(self.warning_color +
+                            f"Output directory '{self.out_prefix}' exists, will be overwritten" + Colors.ENDC)
+            Support.safe_dir_rm(self.out_prefix)
+
+        Support.safe_dir_create(self.out_prefix)
 
     def summarize_run(self):
         logging.info(self.main_process_color + str(self) + Colors.ENDC)
@@ -315,9 +327,12 @@ class Analysis:
 
     # TODO: polish code
     def perform_qa(self):
-        # for sample in self.samples:
-        #     Support.run_command(f"fastqc {} {}")
-        pass
+        outdir = os.path.join(self.out_prefix, "qa")
+        logging.info(f"Starting quality assessment (fastqc), results will be stored here: {outdir}")
+        Support.safe_dir_create(outdir)
+        for sample_id in self.samples:
+            Support.run_command(f"fastqc -o {outdir} " + self.samples[sample_id]["r1"] + " " +
+                                self.samples[sample_id]["r2"])
 
     # TODO: polish code
     def perform_qc(self):
@@ -377,8 +392,8 @@ if __name__ == '__main__':
 
     # Add all output arguments
     all_output_group = all_parser.add_argument_group('Output options')
-    all_output_group.add_argument('--out-prefix', required=False, default=f"output-{TIMESTAMP}", metavar='<OUTPREFIX>',
-                                  type=str, dest="out_prefix",
+    all_output_group.add_argument('--out-prefix', '-o', '--o', required=False, default=f"output-{TIMESTAMP}",
+                                  metavar='<OUTPREFIX>', type=str, dest="out_prefix",
                                   help="""Output directory where all the files will be created. 
                                   Output report will be created as <OUTPUTPREFIX>.report""")
 
