@@ -395,9 +395,9 @@ class Analysis:
         logging.info(f"Quality assessed for all samples")
 
         # TODO: Implement multiqc
-        # logging.info(f"Compiling QA reports")
-        # cmd = f"multiqc {outdir}"
-        # Support.run_command(cmd)
+        logging.info(f"Compiling QA reports")
+        cmd = f"multiqc -o {outdir} {outdir}"
+        Support.run_command(cmd)
 
     # TODO: polish code
     def perform_qc(self):
