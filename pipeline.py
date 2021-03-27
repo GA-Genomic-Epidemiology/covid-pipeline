@@ -23,7 +23,7 @@ import sys
 import time
 from argparse import ArgumentParser, HelpFormatter
 
-# import pathos.multiprocessing as mp
+import pathos.multiprocessing as mp
 
 PROGRAM_NAME = "pipeline.py"
 VERSION = __version__
@@ -319,7 +319,7 @@ class Analysis:
         with open(os.path.join(self.out_prefix, "runtime.log"), "w") as pf:
             pf.write("Step\tTime(sec)\tPercentTotal\n")
             for step in time_dict:
-                pf.write(f"{step}\t{time_dict[step]}\t{round(100 * time_dict[step] / total_time, 2)}\n")
+                pf.write(f"{step}\t{round(time_dict[step], 2)}\t{round(100 * time_dict[step] / total_time, 2)}\n")
 
     # TODO: Make fasta index
     def preprocess_ref_files(self):
@@ -381,14 +381,23 @@ class Analysis:
         outdir = os.path.join(self.out_prefix, Analysis.out_subdir['qa'])
         logging.info(f"Starting quality assessment (FastQC), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
+        cmd_queue = []
         for sample_id in self.samples:
-            logging.info(f"Assessing {sample_id}")
+            logging.info(f"Queuing {sample_id}")
             r1 = self.samples[sample_id]["r1"]
             r2 = self.samples[sample_id]["r2"]
-            Support.run_command(command_str=f"fastqc -o {outdir} -t {self.threads} {r1} {r2}")
+            cmd = f"fastqc -o {outdir} {r1} {r2}"
+            # cmd = f"fastqc -o {outdir} -t {self.threads} {r1} {r2}"
+            # Support.run_command(command_str=cmd)
+            cmd_queue.append(cmd)
+        pool = mp.Pool(processes=self.threads)
+        pool.map(lambda x: Support.run_command(command_str=x), cmd_queue)
+        logging.info(f"Quality assessed for all samples")
 
         # TODO: Implement multiqc
-        # multiqc {outdir}
+        # logging.info(f"Compiling QA reports")
+        # cmd = f"multiqc {outdir}"
+        # Support.run_command(cmd)
 
     # TODO: polish code
     def perform_qc(self):
@@ -517,7 +526,7 @@ class Analysis:
             out_vcf = self.samples[sample_id]["filtvcf"]
 
             cmd = f"bcftools filter -i'FORMAT/DP>{self.depth_filter} && QUAL>30' "
-            cmd += f"-r'{Analysis.reference_seqid}:{Analysis.swift_regions}' {in_vcf} -o {out_vcf}"
+            cmd += f"-r'{Analysis.reference_seqid}:{Analysis.swift_regions}' {in_vcf} -O z -o {out_vcf}"
             Support.run_command(command_str=cmd)
 
             cmd = f"bcftools index {out_vcf}"
