@@ -2,9 +2,9 @@
 
 __author__ = "Lavanya Rishishwar, Anna Gaines, Emily Norris, Andrew Conley"
 __copyright__ = "Copyright 2021, Lavanya Rishishwar, Anna Gaines, Emily Norris, Andrew Conley"
-__credits__ = ["Lavanya Rishishwar"]
+__credits__ = ["Lavanya Rishishwar", "Emily Norris", "Anna Gaines", "Andrew Conley"]
 __license__ = "GPL"
-__version__ = "0.1"
+__version__ = "0.2"
 __maintainer__ = "Lavanya Rishishwar, Anna Gaines, Emily Norris, Andrew Conley"
 __email__ = "lavanyarishishwar@gmail.com"
 __status__ = "Development"
@@ -188,10 +188,12 @@ class Support:
 class Analysis:
     # TODO: package these files
     reference_file = "NC_045512.2.fasta"
+    reference_mmi = reference_file.replace(".fasta", ".mmi")
     reference_seqid = "NC_045512.2"
+    adapter_file = "adapters.fasta"
     swift_regions = "25-29852"
     ftypes = ["*.fastq", "*.fq", "*.fastq.gz", "*.fq.gz"]
-    program_list = ["fastqc", "trimmomatic", "bwa", "sambamba", "bcftools", "tabix"]
+    program_list = ["fastqc", "fastp", "trimmomatic", "bwa2", "bwa", "sambamba", "bcftools", "tabix"]
     out_subdir = {'qa': '1-QualityAssessment', 'qc': '2-QualityControl', 'map': '3-Mapping',
                   'cov': '4-CoverageCalculation', 'varcall': '4-VariantCalling', 'varfilt': '5-VariantFiltering',
                   'cons': '6-ConsensusCalling', 'pangolin': '7-Pangolin', 'nextclade': '8-NextClade'}
@@ -208,6 +210,9 @@ class Analysis:
         self.min_read_qual = opts.min_read_qual
         self.min_base_qual = opts.min_base_qual
         self.min_genome_cov = opts.min_genome_cov
+        self.trimming_program = opts.trimming_program
+        self.mapping_program = opts.mapping_program
+
         self.threads = opts.threads
         self.log_file = opts.log_file
         self.verbosity = opts.verbosity
@@ -254,6 +259,9 @@ class Analysis:
                 min_read_len                  =  {self.min_read_len}
                 min_read_qual                 =  {self.min_read_qual}
                 min_base_qual                 =  {self.min_base_qual}
+                min_genome_cov                =  {self.min_genome_cov}
+                trimming_program              =  {self.trimming_program}
+                mapping_program               =  {self.mapping_program}
         """
         return long_string
 
@@ -270,6 +278,16 @@ class Analysis:
             self.errors += [self.sub_command + ' requires --directory']
             return
 
+        if self.mapping_program == "bwa":
+            bwa_ext = ["amb", "ann", "bwt", "fai", "pac", "sa"]
+            for ext in bwa_ext:
+                if not os.path.isfile(f"{Analysis.reference_file}.{ext}"):
+                    self.analysis += ['preprocess_ref_files']
+                    break
+        else:
+            if not os.path.isfile(Analysis.reference_mmi) or not os.path.isfile(f"{Analysis.reference_file}.fai"):
+                self.analysis += ['preprocess_ref_files']
+
         if os.path.isdir(self.out_prefix):
             logging.warning(self.warning_color +
                             f"Output directory '{self.out_prefix}' exists, will be overwritten" + Colors.ENDC)
@@ -284,18 +302,32 @@ class Analysis:
 
     def go(self):
         self.summarize_run()
+        time_dict = {}
+        total_time = 0
         while True:
             step = self.analysis[0]
             self.analysis = self.analysis[1:]
             function = getattr(self, step)
+
+            start_time = time.time()
             function()
+            time_dict[step] = time.time() - start_time
+            total_time += time_dict[step]
             if len(self.analysis) == 0:
                 logging.info(f"Full process took {round(time.time() - self.time, 2)} seconds")
                 break
+        with open(os.path.join(self.out_prefix, "runtime.log"), "w") as pf:
+            pf.write("Step\tTime(sec)\tPercentTotal\n")
+            for step in time_dict:
+                pf.write(f"{step}\t{time_dict[step]}\t{round(100 * time_dict[step] / total_time, 2)}\n")
 
     # TODO: Make fasta index
     def preprocess_ref_files(self):
-        pass
+        if self.mapping_program == "bwa":
+            Support.run_command(f"bwa index {Analysis.reference_file}")
+        else:
+            Support.run_command(f"minimap2 -d {Analysis.reference_mmi} {Analysis.reference_file}")
+        Support.run_command(f"samtools index {Analysis.reference_file}")
 
     # TODO: Implement safe file pulls
     # TODO: Implement lane merging
@@ -361,7 +393,7 @@ class Analysis:
     # TODO: polish code
     def perform_qc(self):
         outdir = os.path.join(self.out_prefix, Analysis.out_subdir['qc'])
-        logging.info(f"Starting quality control (trimmomatic), results will be stored here: {outdir}")
+        logging.info(f"Starting quality control ({self.trimming_program}), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
             logging.info(f"Trimming {sample_id}")
@@ -372,16 +404,20 @@ class Analysis:
             trim_r1 = self.samples[sample_id]["qc_r1"]
             trim_r2 = self.samples[sample_id]["qc_r2"]
 
-            cmd = f"trimmomatic PE -threads {self.threads} -trimlog {outdir}/{sample_id}.trimlog "
-            cmd += f"{r1} {r2} {trim_r1} /dev/null {trim_r2} /dev/null "
-            cmd += f"ILLUMINACLIP:TruSeq3-PE-JI.fa:2:30:10:1:true ILLUMINACLIP:TruSeq3-PE-JI2.fa:2:30:10 "
-            cmd += f"SLIDINGWINDOW:10:{self.min_base_qual} MINLEN:{self.min_read_len} AVGQUAL:{self.min_read_qual}"
+            if self.trimming_program == "trimmomatic":
+                cmd = f"trimmomatic PE -threads {self.threads} -trimlog {outdir}/{sample_id}.trimlog "
+                cmd += f"{r1} {r2} {trim_r1} /dev/null {trim_r2} /dev/null "
+                cmd += f"ILLUMINACLIP:{Analysis.adapter_file}:2:30:10:1:true"
+                cmd += f"SLIDINGWINDOW:10:{self.min_base_qual} MINLEN:{self.min_read_len} AVGQUAL:{self.min_read_qual}"
+            else:
+                cmd = f"fastp -i {r1} -o {trim_r1} -I {r2} -O {trim_r2} --adapter_fasta {Analysis.adapter_file} -5 -W 10"
+                cmd += f" -M {self.min_read_qual} -e {self.min_read_qual} -l {self.min_read_len} -w {self.threads}"
             Support.run_command(command_str=cmd)
 
     # TODO: polish code
     def map_reads(self):
         outdir = os.path.join(self.out_prefix, Analysis.out_subdir['varcall'])
-        logging.info(f"Starting variant calling (BWA/HTSlib), results will be stored here: {outdir}")
+        logging.info(f"Starting read-to-genome mapping ({self.mapping_program}), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
             logging.info(f"Mapping {sample_id}")
@@ -392,8 +428,11 @@ class Analysis:
             ubam = f"{outdir}/{sample_id}.unsorted.bam"
             bam = self.samples[sample_id]["bam"]
 
-            Support.run_command(
-                command_str=f"bwa mem {Analysis.reference_file} {r1} {r2} -M -t {self.threads} -o {sam}")
+            if self.mapping_program == "bwa":
+                cmd = f"bwa mem {Analysis.reference_file} {r1} {r2} -M -t {self.threads} -o {sam}"
+            else:
+                cmd = f"minimap2 -ax sr -o {sam} -t {self.threads} {Analysis.reference_mmi} {r1} {r2}"
+            Support.run_command(command_str=cmd)
 
             # TODO: Calculate mapped reads %
 
@@ -622,9 +661,16 @@ if __name__ == '__main__':
     all_filter_group.add_argument('--min-base-quality', required=False, default=18, metavar='<BASEQUAL>', type=int,
                                   help='Minimum sequencing base quality for read trimming (Default: %(default)s)',
                                   dest="min_base_qual")
-    all_filter_group.add_argument('--min-genome-cov', required=False, default=90, metavar='<GENCOV>', type=int,
-                                  help='Minimum % of genome covered (Default: %(default)s)',
+    all_filter_group.add_argument('--min-genome-cov', required=False, default=90, metavar='<GENCOV>', type=float,
+                                  help='Minimum %% of genome covered (Default: %(default)s)',
                                   dest="min_genome_cov")
+    all_filter_group.add_argument('--trimming-program', required=False, default="fastp", metavar='<TRIMPROG>', type=str,
+                                  help='Which trimming program to use? Options: fastp,trimmomatic (Default: %(default)s)',
+                                  dest="trimming_program")
+    all_filter_group.add_argument('--mapping-program', required=False, default="minimap2", metavar='<MAPPROG>',
+                                  type=str,
+                                  help='Which mapper to use? Options: minimap2,bwa (Default: %(default)s)',
+                                  dest="mapping_program")
 
     # Add all performance arguments
     all_runtime_group = all_parser.add_argument_group('Runtime options')
