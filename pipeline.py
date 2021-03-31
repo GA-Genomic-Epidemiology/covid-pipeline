@@ -497,7 +497,6 @@ class Analysis:
         logging.info(f"Starting read-to-genome mapping ({self.mapping_program}), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
-            logging.info(f"Mapping {sample_id}")
             self.samples[sample_id]["bam"] = f"{outdir}/{sample_id}.bam"
             r1 = self.samples[sample_id]["qc_r1"]
             r2 = self.samples[sample_id]["qc_r2"]
