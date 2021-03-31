@@ -11,6 +11,7 @@ __status__ = "Development"
 
 import datetime
 import glob
+import json
 import logging
 import os.path
 import random
@@ -86,8 +87,12 @@ class Support:
 
     # TODO: Implement checks for dependency progams
     @staticmethod
-    def check_dependencies(program_list: list = None):
-        pass
+    def check_dependencies(program_list: list = None) -> list:
+        errors = []
+        for program in program_list:
+            if shutil.which(program) is None:
+                errors.append(program)
+        return errors
 
     @staticmethod
     def run_command(command_str: str = None, command_list: list = None, shell=False, split=True):
@@ -192,11 +197,15 @@ class Analysis:
     reference_seqid = "NC_045512.2"
     adapter_file = "adapters.fasta"
     swift_regions = "25-29852"
+    masterfile = "sarscov2_v2_masterfile.txt"
     ftypes = ["*.fastq", "*.fq", "*.fastq.gz", "*.fq.gz"]
-    program_list = ["fastqc", "fastp", "trimmomatic", "bwa2", "bwa", "sambamba", "bcftools", "tabix"]
+    program_list = {'required': ["fastqc", "multiqc", "sambamba", "bcftools", "tabix"],
+                    'trimming': ["fastp", "trimmomatic"],
+                    'mapping': ["minimap2", "bwa"],
+                    'seq_prot': ['primerclip']}
     out_subdir = {'qa': '1-QualityAssessment', 'qc': '2-QualityControl', 'map': '3-Mapping',
-                  'cov': '4-CoverageCalculation', 'varcall': '4-VariantCalling', 'varfilt': '5-VariantFiltering',
-                  'cons': '6-ConsensusCalling', 'pangolin': '7-Pangolin', 'nextclade': '8-NextClade'}
+                  'cov': '4-CoverageCalculation', 'varcall': '5-VariantCalling', 'varfilt': '6-VariantFiltering',
+                  'cons': '7-ConsensusCalling', 'pangolin': '8-Pangolin', 'nextclade': '9-NextClade'}
 
     def __init__(self, opts):
         # General attributes
@@ -221,8 +230,11 @@ class Analysis:
         self.errors = []
         # The actual queue for the analysis
         self.analysis = []
+        # Programs to check
+        self.program_check = Analysis.program_list["required"]
         # Samples collected
         self.samples = {}
+        self.revmap = {}
         # Output report
         self.report = {}
 
@@ -268,7 +280,7 @@ class Analysis:
     def validate_options(self):
         if self.sub_command == "all":
             self.validate_all_arguments()
-            self.analysis += ['get_files', 'perform_qa', 'perform_qc', 'map_reads',
+            self.analysis += ['get_files', 'perform_qa', 'perform_qc', 'get_read_metrics', 'map_reads',
                               'calculate_coverage_metrics', 'call_variants', 'filter_variants', 'call_consensus',
                               'run_pangolin', 'run_nextclade', 'print_report']
 
@@ -284,9 +296,26 @@ class Analysis:
                 if not os.path.isfile(f"{Analysis.reference_file}.{ext}"):
                     self.analysis += ['preprocess_ref_files']
                     break
+            self.program_check.append("bwa")
         else:
+            self.mapping_program = "minimap2"
+            self.program_check.append("minimap2")
             if not os.path.isfile(Analysis.reference_mmi) or not os.path.isfile(f"{Analysis.reference_file}.fai"):
                 self.analysis += ['preprocess_ref_files']
+
+        if self.trimming_program == "trimmomatic":
+            self.program_check.append("trimmomatic")
+        else:
+            self.trimming_program = "fastp"
+            self.program_check.append("fastp")
+
+        if re.match("swift", self.seqprot, re.IGNORECASE):
+            self.seqprot = "swift"
+            self.program_check.append("primerclip")
+        elif re.match("rsv", self.seqprot, re.IGNORECASE):
+            self.seqprot = "rsv"
+        else:
+            self.errors += [f"Unrecognized sequence protocol = {self.seqprot}"]
 
         if os.path.isdir(self.out_prefix):
             logging.warning(self.warning_color +
@@ -294,6 +323,12 @@ class Analysis:
             Support.safe_dir_rm(self.out_prefix)
 
         Support.safe_dir_create(self.out_prefix)
+
+        missing_programs = Support.check_dependencies(self.program_check)
+        if len(missing_programs) == 0:
+            logging.info("All dependencies were found")
+        else:
+            self.errors += ["The following programs were not found = " + ", ".join(missing_programs)]
 
     def summarize_run(self):
         logging.info(self.main_process_color + str(self) + Colors.ENDC)
@@ -369,6 +404,8 @@ class Analysis:
                 self.errors.append(f"{sample_id} only has one file from the pair")
             else:
                 self.report[sample_id] = {}
+                self.revmap[self.samples[sample_id]["r1"]] = sample_id
+                self.revmap[self.samples[sample_id]["r2"]] = sample_id
 
         if len(self.errors) > 0:
             Support.error_out(messages=self.errors)
@@ -394,7 +431,6 @@ class Analysis:
         pool.map(lambda x: Support.run_command(command_str=x), cmd_queue)
         logging.info(f"Quality assessed for all samples")
 
-        # TODO: Implement multiqc
         logging.info(f"Compiling QA reports")
         cmd = f"multiqc -o {outdir} {outdir}"
         Support.run_command(cmd)
@@ -419,13 +455,45 @@ class Analysis:
                 cmd += f"ILLUMINACLIP:{Analysis.adapter_file}:2:30:10:1:true"
                 cmd += f"SLIDINGWINDOW:10:{self.min_base_qual} MINLEN:{self.min_read_len} AVGQUAL:{self.min_read_qual}"
             else:
+                json_out = f"{outdir}/{sample_id}.json"
+                html_out = f"{outdir}/{sample_id}.html"
                 cmd = f"fastp -i {r1} -o {trim_r1} -I {r2} -O {trim_r2} --adapter_fasta {Analysis.adapter_file} -5 -W 10"
                 cmd += f" -M {self.min_read_qual} -e {self.min_read_qual} -l {self.min_read_len} -w {self.threads}"
+                cmd += f" -j {json_out} -h {html_out}"
             Support.run_command(command_str=cmd)
+
+    def get_read_metrics(self):
+        logging.info(f"Calculating read metrics")
+        if self.trimming_program == "trimmomatic":
+            multiqc_file = os.path.join(self.out_prefix, Analysis.out_subdir['qc'], "multiqc_data",
+                                        "multiqc_general_stats.txt")
+            with open(multiqc_file, "r") as f:
+                f.readline()
+                seen = {}
+                for line in f:
+                    cols = line.rstrip().split("\t")
+                    this_sample_id = self.revmap[cols[0]]
+                    if this_sample_id in seen:
+                        continue
+                    num_reads = cols[-1]
+                    self.report[this_sample_id]["Pre-QC Read Count"] = int(num_reads)
+                    seen[this_sample_id] = 1
+                    # TODO: Implement method for calculating this
+                    self.report[this_sample_id]["Post-QC Read Count"] = "Not calculated"
+                    self.report[this_sample_id]["% Filtered"] = "Not calculated"
+        else:
+            for sample_id in self.samples:
+                json_file = os.path.join(self.out_prefix, Analysis.out_subdir['qc'], f"{sample_id}.json")
+                json_data = json.load(open(json_file, "r"))
+                pre = int(json_data["summary"]["before_filtering"]["total_reads"])
+                post = int(json_data["summary"]["after_filtering"]["total_reads"])
+                self.report[sample_id]["Pre-QC Read Count"] = pre
+                self.report[sample_id]["Post-QC Read Count"] = post
+                self.report[sample_id]["% Filtered"] = round(post * 100 / pre, 2)
 
     # TODO: polish code
     def map_reads(self):
-        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['varcall'])
+        outdir = os.path.join(self.out_prefix, Analysis.out_subdir['map'])
         logging.info(f"Starting read-to-genome mapping ({self.mapping_program}), results will be stored here: {outdir}")
         Support.safe_dir_create(outdir)
         for sample_id in self.samples:
@@ -433,17 +501,30 @@ class Analysis:
             self.samples[sample_id]["bam"] = f"{outdir}/{sample_id}.bam"
             r1 = self.samples[sample_id]["qc_r1"]
             r2 = self.samples[sample_id]["qc_r2"]
+            untrim_sam = f"{outdir}/{sample_id}_untrim.sam"
             sam = f"{outdir}/{sample_id}.sam"
             ubam = f"{outdir}/{sample_id}.unsorted.bam"
             bam = self.samples[sample_id]["bam"]
 
+            logging.info(f"Mapping reads for {sample_id}")
             if self.mapping_program == "bwa":
-                cmd = f"bwa mem {Analysis.reference_file} {r1} {r2} -M -t {self.threads} -o {sam}"
+                cmd = f"bwa mem {Analysis.reference_file} {r1} {r2} -M -t {self.threads} -o {untrim_sam}"
             else:
-                cmd = f"minimap2 -ax sr -o {sam} -t {self.threads} {Analysis.reference_mmi} {r1} {r2}"
+                cmd = f"minimap2 -ax sr -o {untrim_sam} -t {self.threads} {Analysis.reference_mmi} {r1} {r2}"
             Support.run_command(command_str=cmd)
 
+            if self.seqprot == "swift":
+                logging.info(f"Trimming primers for {sample_id}")
+                Analysis.perform_primerclip(insam=untrim_sam, outsam=sam)
+                os.remove(untrim_sam)
+            else:
+                os.rename(src=untrim_sam, dst=sam)
+
             # TODO: Calculate mapped reads %
+            cmd = f"samtools view -c -F 260 {sam}"
+            read_count = int(Support.run_command(command_str=cmd).rstrip())
+            self.report[sample_id]["Mapped Read Count"] = read_count
+            self.report[sample_id]["% Mapped"] = round(read_count * 100 / self.report[sample_id]["Pre-QC Read Count"], 2)
 
             logging.info(f"Converting {sample_id} SAM to BAM")
             Support.run_command(command_str=f"""sambamba view -F 'not (unmapped or mate_is_unmapped)'
@@ -453,6 +534,12 @@ class Analysis:
             logging.info(f"Sorting {sample_id} BAM")
             Support.run_command(command_str=f"sambamba sort -o {bam} -t {self.threads} {ubam}")
             os.remove(ubam)
+
+    # TODO: polish code
+    @staticmethod
+    def perform_primerclip(insam: str, outsam: str):
+        cmd = f"primerclip -s {Analysis.masterfile} {insam} {outsam}"
+        Support.run_command(command_str=cmd, shell=True, split=False)
 
     # TODO: polish code
     def calculate_coverage_metrics(self):
@@ -465,13 +552,11 @@ class Analysis:
             depth_file = os.path.join(outdir, f"{sample_id}.depth")
 
             cmd = f"samtools depth -d 0 -a -r '{Analysis.reference_seqid}:{Analysis.swift_regions}' {bam} > {depth_file}"
-
             Support.run_command(command_str=cmd, shell=True, split=False)
 
             total_bases = 0
             depth_coverage = 0
             genome_coverage = 0
-
             with open(depth_file, "r") as f:
                 for line in f:
                     depth = int(line.rstrip().split("\t")[2])
