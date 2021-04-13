@@ -54,7 +54,7 @@ pip install multiqc
 npm install --global @neherlab/nextclade
 
 # Download this pipeline
-git clone https://github.com/appliedbinf/covid-pipeline
+git clone https://github.com/GA-Genomic-Epidemiology/covid-pipeline
 
 # Give it executable permissions
 cd covid-pipeline
