@@ -213,8 +213,8 @@ dependencies:
   - pip:
     - joblib==1.0.1
     - pandas==1.0.1
-    - pangolearn==2021-04-28
-    - pangolin==2.4.2
+    - git+https://github.com/cov-lineages/pangolin@v.2.4.2
+    - git+git://github.com/cov-lineages/pangoLEARN.git@64b0efc150a7f97b0bef3262c1ddffcc0b88d9ab
     - pysam==0.16.0.1
     - scikit-learn==0.23.1
     - scipy==1.6.3
