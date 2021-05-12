@@ -192,12 +192,12 @@ class Support:
 
 class Analysis:
     # TODO: package these files
-    reference_file = "NC_045512.2.fasta"
+    reference_file = os.path.join(os.path.dirname(__file__), "NC_045512.2.fasta")
     reference_mmi = reference_file.replace(".fasta", ".mmi")
     reference_seqid = "NC_045512.2"
-    adapter_file = "adapters.fasta"
+    adapter_file = os.path.join(os.path.dirname(__file__), "adapters.fasta")
     swift_regions = "25-29852"
-    masterfile = "sarscov2_v2_masterfile.txt"
+    masterfile = os.path.join(os.path.dirname(__file__), "sarscov2_v2_masterfile.txt")
     ftypes = ["*.fastq", "*.fq", "*.fastq.gz", "*.fq.gz"]
     program_list = {'required': ["fastqc", "multiqc", "sambamba", "bcftools", "tabix"],
                     'trimming': ["fastp", "trimmomatic"],
@@ -420,15 +420,15 @@ class Analysis:
         Support.safe_dir_create(outdir)
         cmd_queue = []
         for sample_id in self.samples:
-            logging.info(f"Queuing {sample_id}")
+            logging.info(f"Running {sample_id}")
             r1 = self.samples[sample_id]["r1"]
             r2 = self.samples[sample_id]["r2"]
-            cmd = f"fastqc -o {outdir} {r1} {r2}"
-            # cmd = f"fastqc -o {outdir} -t {self.threads} {r1} {r2}"
-            # Support.run_command(command_str=cmd)
-            cmd_queue.append(cmd)
-        pool = mp.Pool(processes=self.threads)
-        pool.map(lambda x: Support.run_command(command_str=x), cmd_queue)
+            #cmd = f"fastqc -o {outdir} {r1} {r2}"
+            cmd = f"fastqc -o {outdir} -t {self.threads} {r1} {r2}"
+            Support.run_command(command_str=cmd)
+            #cmd_queue.append(cmd)
+        #pool = mp.Pool(processes=self.threads)
+        #pool.map(lambda x: Support.run_command(command_str=x), cmd_queue)
         logging.info(f"Quality assessed for all samples")
 
         logging.info(f"Compiling QA reports")
@@ -565,6 +565,9 @@ class Analysis:
                     depth_coverage += depth
                     total_bases += 1
 
+            if total_bases == 0:
+                total_bases = 1 # dealing with zero-division error
+            
             self.report[sample_id]["Depth Coverage"] = round(depth_coverage / total_bases, 2)
             self.report[sample_id]["Genome Coverage"] = round(genome_coverage * 100 / total_bases, 2)
 
