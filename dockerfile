@@ -19,11 +19,12 @@ RUN source /opt/conda/etc/profile.d/conda.sh && \
     conda activate covidpipeline && \
     npm install --global @neherlab/nextclade
 
-COPY . .
+RUN apt update && apt install libncurses5 -y
 
+COPY . .
 
 RUN chmod +x pipeline.py
 
-ENTRYPOINT ["conda", "run", "-n", "covidpipeline", "python", "/pipeline/pipeline.py", "all" ]
+ENTRYPOINT ["conda", "run", "--no-capture-output", "-n", "covidpipeline", "python", "/pipeline/pipeline.py", "all" ]
 
 CMD [ "--help" ]

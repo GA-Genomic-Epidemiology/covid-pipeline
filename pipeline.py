@@ -423,12 +423,12 @@ class Analysis:
             logging.info(f"Running {sample_id}")
             r1 = self.samples[sample_id]["r1"]
             r2 = self.samples[sample_id]["r2"]
-            #cmd = f"fastqc -o {outdir} {r1} {r2}"
+            cmd = f"fastqc -o {outdir} {r1} {r2}"
             cmd = f"fastqc -o {outdir} -t {self.threads} {r1} {r2}"
-            Support.run_command(command_str=cmd)
-            #cmd_queue.append(cmd)
-        #pool = mp.Pool(processes=self.threads)
-        #pool.map(lambda x: Support.run_command(command_str=x), cmd_queue)
+            #Support.run_command(command_str=cmd)
+            cmd_queue.append(cmd)
+        pool = mp.Pool(processes=self.threads)
+        pool.map(lambda x: Support.run_command(command_str=x), cmd_queue)
         logging.info(f"Quality assessed for all samples")
 
         logging.info(f"Compiling QA reports")
@@ -520,8 +520,9 @@ class Analysis:
                 os.rename(src=untrim_sam, dst=sam)
 
             # TODO: Calculate mapped reads %
-            cmd = f"samtools view -c -F 260 {sam}"
-            read_count = int(Support.run_command(command_str=cmd).rstrip())
+            cmd = f"samtools view -c -F 260 {sam} > {sam}.stats"
+            Support.run_command(command_str=cmd, shell=True, split=False)
+            read_count = int(open(f"{sam}.stats").read().rstrip())
             self.report[sample_id]["Mapped Read Count"] = read_count
             self.report[sample_id]["% Mapped"] = round(read_count * 100 / self.report[sample_id]["Pre-QC Read Count"], 2)
 
