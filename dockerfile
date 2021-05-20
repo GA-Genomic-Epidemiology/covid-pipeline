@@ -24,6 +24,6 @@ COPY . .
 
 RUN chmod +x pipeline.py
 
-ENTRYPOINT ["conda", "run", "-n", "covidpipeline", "python", "/pipeline/pipeline.py" ]
+ENTRYPOINT ["conda", "run", "-n", "covidpipeline", "python", "/pipeline/pipeline.py", "all" ]
 
 CMD [ "--help" ]
