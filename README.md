@@ -23,7 +23,7 @@ This pipeline requires the following OS/programs/modules to run:
 * minimap2 or bwa
 * primerclip
 * pangolin 
-* 
+  
 * Python version 3.7 or higher
 * Python libraries = Pathos
 
